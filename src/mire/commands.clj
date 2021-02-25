@@ -1,6 +1,6 @@
 (ns mire.commands
   (:use [mire.rooms :only [rooms room-contains? room-contains-gold? room-contains-loot?]]
-        [mire.player])
+        [mire.player :as player])
   (:use [clojure.string :only [join]]))
 
 (defn- move-between-refs
@@ -24,21 +24,33 @@
                            @(:items @*current-room*)))
        (join "\r\n" (map #(str "Player " % " is here.\r\n")
                            @(:inhabitants @*current-room*)))
+       (join "\r\n" (map #(str "There " % " is here.\r\n")
+                           @(:loot @*current-room*)))
        (join (str "GOLD " @(:gold @*current-room*) " here.\r\n"))
-       (join (str "health: " (@health *name*) ".\r\n")) 
+       (join (str "health: " (@health *name*) ".\r\n"))
        (join (str "score: " (@score *name*) ".\r\n"))
+       (join (str "live: " (@lives *name*) ".\r\n"))
   ))
 
+(defn players
+  "Get a list players"
+  []
+  (str
+      (doseq [inhabitant (keys @lives)]
+         (println (str inhabitant ":" (@lives inhabitant)))
+    )
+
+  ))
 (defn move
   "\"♬ We gotta get out of this place... ♪\" Give a direction."
   [direction]
   (dosync
-   (let [target-name ((:exits @*current-room*) (keyword direction))      
-         target (@rooms target-name)]                                    
-     (if (not= @( :lock target) #{(some @( :lock target) @*inventory*)}) 
-        (if (not= @( :lock target) #{})                                  
-           ( str "LOCK! Find an " @( :lock target) " to pass " )       
-        (if target                                                          
+   (let [target-name ((:exits @*current-room*) (keyword direction))
+         target (@rooms target-name)]
+     (if (not= @( :lock target) #{(some @( :lock target) @*inventory*)})
+        (if (not= @( :lock target) #{})
+           ( str "LOCK! Find an " @( :lock target) " to pass " )
+        (if target
            (do
              (move-between-refs *name*
                                 (:inhabitants @*current-room*)
@@ -46,7 +58,7 @@
              (ref-set *current-room* target)
              (look))
         "You can't go that way."))
-    (if target                                                            
+    (if target
        (do
          (move-between-refs *name*
                             (:inhabitants @*current-room*)
@@ -59,15 +71,16 @@
   "Pick something up."
   [thing]
   (dosync
-    (if (or (= thing "coin") (= thing "treasuregold") (= thing "bagmoney"))
+    (cond
+    (or (= thing "coin") (= thing "treasuregold") (= thing "bagmoney"))
       (if (room-contains-gold? @*current-room* thing)
         (do
           (case thing
             "coin"
             (do (alter *money* inc) (change-points 1))
-            "bagmoney" 
+            "bagmoney"
             (do (alter *money* + 7) (change-points 7))
-            "treasuregold" 
+            "treasuregold"
             (do (alter *money* + 15) (change-points 15))
           )
           (if (= ((keyword thing) @(:gold @*current-room*)) 1)
@@ -83,20 +96,24 @@
         (str " There isn't any " thing " here.")
       )
 
-
-
-      (if (room-contains? @*current-room* thing)
-        (do
-          (move-between-refs (keyword thing)
-                             (:items @*current-room*)
-                             *inventory*)
-          (str "You picked up the " thing ".")
+      (room-contains? @*current-room* thing)
+        (case thing
+          "arrows" (do
+            (.set player/*arrows* (+ (.get player/*arrows*) 5))
+            (move-delete (keyword thing) (:items @*current-room*))
+            (println "You picked up arrows.")
+            )
+            (do
+              (move-between-refs (keyword thing)
+                                 (:items @*current-room*)
+                                 *inventory*)
+              (str "You picked up the " thing ".")
+            )
         )
-        (str "There isn't any " thing " here.")
+      :default (str "There isn't any " thing " here.")
       )
     )
   )
-)
 
 (defn seemoney
   "See your money"
@@ -107,8 +124,8 @@
 (defn discard
   "Put something down that you're carrying."
   [thing]
-  (if (= #{(keyword thing)} @( :lock @*current-room*))                              
-   (str "Here you cannot throw " @( :lock @*current-room*))                         
+  (if (= #{(keyword thing)} @( :lock @*current-room*))
+   (str "Here you cannot throw " @( :lock @*current-room*))
   (dosync
    (if (or (= thing "coin") (= thing "treasuregold") (= thing "bagmoney"))
         (case thing
@@ -169,7 +186,10 @@
   "See what you've got."
   []
   (str "You are carrying:\r\n"
-       (join "\r\n" (seq @*inventory*))))
+       (join "\r\n" (seq @*inventory*))
+       "\nYou have " (.get player/*arrows*) " arrows."
+  )
+)
 
 (defn detect
   "If you have the detector, you can see which room an item is in."
@@ -205,12 +225,47 @@
     (if (contains? @health target)
       (if (contains? @(:inhabitants @*current-room*) target)
         (do
+          (if (not= (@lives target) "dead")
+
+            (do
           (commute health assoc target (- (@health target) damage))
-          "Successful attack."
+          (if (< (int(@health target)) 1)
+           ((commute lives assoc target "dead")
+           (println
+          (say (str target " killed by " *name* "\r\n")))
+          (commute score assoc *name* (+ (@score *name*) 25)))
+          )
+
+          "Successful attack.")
+          "He is dead")
         )
         "No such target in the room."
       )
       "Target doesn't exist."
+    )
+  )
+)
+
+(defn shoot
+  "Shoot another player"
+  [target]
+  (dosync
+    (if (player/carrying? :bow)
+      (if (> (.get player/*arrows*) 0)
+        (if (contains? @health target)
+          (if (contains? @(:inhabitants @*current-room*) target)
+            (do
+              (commute health assoc target (- (@health target) 50))
+              (.set player/*arrows* (- (.get player/*arrows*) 1))
+              "Great shot!"
+            )
+            "No such target in the room."
+          )
+          "Target doesn't exist."
+        )
+        "You don't have arrows."
+      )
+      "You don't have a bow."
     )
   )
 )
@@ -240,8 +295,14 @@
 )
 
 ;; Command data
+(defn deadplayer
+  []
+  (str "You are dead \r\n"
+  "You score:" (@score *name*) "\r\n"
+  ))
 
-(def commands {"move" move,
+(def commands
+              {"move" move,
                "north" (fn [] (move :north)),
                "south" (fn [] (move :south)),
                "east" (fn [] (move :east)),
@@ -253,9 +314,13 @@
                "detect" detect
                "look" look
                "say" say
+               "players" players
                "help" help
                "attack" attack
-               "buy" buy})
+               "buy" buy
+               "deadplayer" deadplayer
+               "shoot" shoot
+               })
 
 ;; Command handling
 
